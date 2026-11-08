@@ -369,10 +369,11 @@ DiffView::new(|s: &App| &s.diff, |s: &mut App| &mut s.diff)
   with `set_wrap(true)`; split always wraps.
 - **Colours** come from the kit's palette: added and removed lines take a tint of the success
   and danger colours, word changes a stronger one, with a bar at the edge. Syntax colours sit
-  under them (`rune_kit::syntax`, swappable with `set_highlighter`). Tabs line up at
+  under them (`rune_kit::syntax`, swappable with `set_highlighter`; `DiffView::syntax_theme` gives them the app's own code colours). Tabs line up at
   four-column stops and copy as tabs.
 - **Unchanged ranges** between hunks fold into a row that opens 20 lines up, 20 down, or all
-  (`expand`). A parsed patch has no whole files, so only diffs built from two texts have folds that open.
+  (`expand`). A parsed patch has no whole files, so its folds open only once it's given them: `FileDiff::with_texts(old, new)`, which keeps a text only if it fits the hunks.
+- **Refreshing** the same diff (the files changed since) with `update_files` keeps each file's collapse, and its opened ranges while they haven't moved; `set_files` starts over.
 - **Files** have a header with the path, a rename arrow, +/− counts, a collapse chevron and
   an app slot (`header_actions`). The header of the file in view sticks to the top.
 - **Annotations** are the app's widgets under a line, keyed by file, side and line, such as

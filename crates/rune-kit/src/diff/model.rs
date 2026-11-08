@@ -218,6 +218,34 @@ impl FileDiff {
         f
     }
 
+    /// A parsed file given its whole texts, before (`old`) and after (`new`), as `git show
+    /// <rev>:<path>` reads them, so its unchanged ranges open as a diff built from texts does.
+    /// `None` for a side with no file (an added or deleted one). The hunks stay as parsed
+    /// (`--histogram` or `-w` ones too). A text is kept only if it fits the hunks: its side's
+    /// removed or added lines exactly, and the context lines but for whitespace (`-w` shows
+    /// lines that differ only in it as context). So a range never opens onto wrong lines.
+    pub fn with_texts(mut self, old: Option<&str>, new: Option<&str>) -> FileDiff {
+        if self.binary {
+            return self;
+        }
+        let squeeze = |t: &str| t.split_whitespace().collect::<String>();
+        let fits = |text: Option<&str>, side: Side, changed: LineKind| -> Option<Rc<Source>> {
+            let src = Source::new(text?);
+            let ok = self.hunks.iter().flat_map(|h| &h.lines).all(|l| {
+                let at = l.number(side).and_then(|n| src.line(n));
+                match l.kind {
+                    k if k == changed => at == Some(l.text.as_str()),
+                    LineKind::Context => at.is_some_and(|t| t == l.text || squeeze(t) == squeeze(&l.text)),
+                    _ => true,
+                }
+            });
+            ok.then(|| Rc::new(src))
+        };
+        self.old_text = fits(old, Side::Old, LineKind::Removed);
+        self.new_text = fits(new, Side::New, LineKind::Added);
+        self
+    }
+
     /// The path to show: the new one, or the old one for a deleted file.
     pub fn path(&self) -> &str {
         self.new_path.as_deref().or(self.old_path.as_deref()).unwrap_or("")

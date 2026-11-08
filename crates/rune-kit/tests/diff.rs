@@ -162,6 +162,52 @@ fn folded_ranges_open_twenty_lines_at_a_time() {
     assert_eq!(p.hidden(0, 1), None);
 }
 
+/// `old` with line 50 changed, as `git diff` writes it: three lines of context.
+fn patch_of_fifty() -> (String, String, String) {
+    let old: String = (1..=100).map(|i| format!("{i}\n")).collect();
+    let new = old.replace("\n50\n", "\nfifty\n");
+    let patch = "diff --git a/n.txt b/n.txt\n--- a/n.txt\n+++ b/n.txt\n@@ -47,7 +47,7 @@\n 47\n 48\n 49\n-50\n+fifty\n 51\n 52\n 53\n".to_owned();
+    (old, new, patch)
+}
+
+#[test]
+fn a_parsed_patch_given_its_texts_opens_its_folds() {
+    let (old, new, patch) = patch_of_fifty();
+    let f = parse(&patch).remove(0).with_texts(Some(&old), Some(&new));
+    assert!(f.expandable());
+    let mut s = DiffState::new(vec![f]);
+    assert_eq!((s.hidden(0, 0), s.hidden(0, 1)), (Some(46), Some(47)));
+    s.expand(0, 0, Expand::All);
+    assert_eq!(s.hidden(0, 0), Some(0));
+    // A text that doesn't fit the hunks (another revision's) isn't kept; the other side is.
+    let wrong = old.replace("\n48\n", "\nforty-eight\n");
+    assert!(!parse(&patch).remove(0).with_texts(Some(&wrong), None).expandable());
+    assert!(!parse(&patch).remove(0).with_texts(Some(&new), Some(&old)).expandable());
+    assert!(parse(&patch).remove(0).with_texts(Some(&wrong), Some(&new)).expandable());
+    // Context that differs only in whitespace still fits (`git diff -w`).
+    let spaced = new.replace("\n49\n", "\n 49\n");
+    assert!(parse(&patch).remove(0).with_texts(None, Some(&spaced)).expandable());
+}
+
+#[test]
+fn updating_the_files_keeps_what_was_collapsed_and_opened() {
+    let (old, new, _) = patch_of_fifty();
+    let other = FileDiff::from_texts("b.txt", "a\n", "b\n");
+    let mut s = DiffState::new(vec![FileDiff::from_texts("n.txt", &old, &new), other.clone()]);
+    s.expand(0, 0, Expand::Up);
+    s.set_collapsed(1, true);
+    // The same diff again, the files in another order: each keeps its own state.
+    s.update_files(vec![other.clone(), FileDiff::from_texts("n.txt", &old, &new)]);
+    assert!(s.collapsed(0));
+    assert_eq!(s.hidden(1, 0), Some(26));
+    // A file whose ranges moved starts folded again; set_files resets everything.
+    let moved = old.replace("\n60\n", "\nsixty\n").replace("\n50\n", "\nfifty\n");
+    s.update_files(vec![other.clone(), FileDiff::from_texts("n.txt", &old, &moved)]);
+    assert_eq!(s.hidden(1, 0), Some(46));
+    s.set_files(vec![other]);
+    assert!(!s.collapsed(0));
+}
+
 // ---- the view ----
 
 struct App {

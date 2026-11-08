@@ -65,6 +65,7 @@ pub struct DiffView<S> {
     on_select: Option<Rc<dyn Fn(&mut S, Option<LineRange>, &mut Tx)>>,
     on_comment: Option<Rc<dyn Fn(&mut S, LineRange, &mut Tx)>>,
     on_visible_file: Option<Rc<dyn Fn(&mut S, usize)>>,
+    syntax: Option<SyntaxTheme>,
 }
 
 impl<S: 'static> DiffView<S> {
@@ -78,6 +79,7 @@ impl<S: 'static> DiffView<S> {
             on_select: None,
             on_comment: None,
             on_visible_file: None,
+            syntax: None,
         }
     }
 
@@ -120,9 +122,16 @@ impl<S: 'static> DiffView<S> {
         self
     }
 
+    /// Code colours in place of [`SyntaxTheme::from_kit`]'s, such as the ones the app's
+    /// [`Markdown`](crate::Markdown) code fences use, so a diff's code matches the rest of it.
+    pub fn syntax_theme(mut self, theme: SyntaxTheme) -> Self {
+        self.syntax = Some(theme);
+        self
+    }
+
     pub fn build(self, s: &S, k: &Kit) -> El {
         let st = (self.get)(s);
-        let look = Look::new(k);
+        let look = Look::new(k, self.syntax);
         let wrap = st.wraps();
         let key = self.key.clone();
         if !wrap && let Some(r) = rune::memo::layout(&format!("{key}/scroll")) {
@@ -205,7 +214,7 @@ struct Tints {
 }
 
 impl Look {
-    fn new(k: &Kit) -> Look {
+    fn new(k: &Kit, syntax: Option<SyntaxTheme>) -> Look {
         let c = &k.c;
         let bg = c.bg_base;
         let dark = k.dark;
@@ -242,7 +251,7 @@ impl Look {
             on_accent: c.white,
             triangle_down: k.glyph.triangle_down,
             triangle_right: k.glyph.triangle_right,
-            syntax: SyntaxTheme::from_kit(k),
+            syntax: syntax.unwrap_or_else(|| SyntaxTheme::from_kit(k)),
             version: 0,
         };
         let mut h = std::hash::DefaultHasher::new();
@@ -250,6 +259,7 @@ impl Look {
             [c.r, c.g, c.b, c.a].map(f32::to_bits).hash(&mut h);
         }
         look.font.size.to_bits().hash(&mut h);
+        look.syntax.hash(&mut h);
         look.version = h.finish();
         look
     }

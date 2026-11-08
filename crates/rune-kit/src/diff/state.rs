@@ -261,6 +261,32 @@ impl DiffState {
         self.rebuild();
     }
 
+    /// [`DiffState::set_files`] for the same diff taken again (its files changed since): a
+    /// file at the same path keeps its collapse, and the lines opened in its unchanged ranges
+    /// while those ranges are where they were. The selection is cleared.
+    pub fn update_files(&mut self, files: Vec<FileDiff>) {
+        let mut before: HashMap<String, (FileUi, Vec<Gap>)> = HashMap::new();
+        for ((f, ui), gaps) in self.files.iter().zip(std::mem::take(&mut self.ui)).zip(std::mem::take(&mut self.gaps)) {
+            before.insert(f.path().to_owned(), (ui, gaps));
+        }
+        self.set_files(files);
+        let mut changed = false;
+        for (i, f) in self.files.iter().enumerate() {
+            let Some((ui, gaps)) = before.remove(f.path()) else { continue };
+            if ui.collapsed {
+                self.ui[i].collapsed = true;
+                changed = true;
+            }
+            if gaps == self.gaps[i] && ui.revealed.len() == self.ui[i].revealed.len() && ui.revealed.iter().any(|r| *r != (0, 0)) {
+                self.ui[i].revealed = ui.revealed;
+                changed = true;
+            }
+        }
+        if changed {
+            self.rebuild();
+        }
+    }
+
     pub fn files(&self) -> &[FileDiff] {
         &self.files
     }
