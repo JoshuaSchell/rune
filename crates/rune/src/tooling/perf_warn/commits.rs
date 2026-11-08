@@ -74,7 +74,7 @@ impl CommitMeter {
 
     /// Handler `name` on the element at `path`, set at `at`, asked for a commit.
     #[inline(always)]
-    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+    #[cfg(debug_assertions)]
     pub(crate) fn handler(&mut self, name: &'static str, path: Option<&str>, at: Option<&'static std::panic::Location<'static>>) {
         #[cfg(debug_assertions)]
         {
@@ -111,7 +111,7 @@ impl CommitMeter {
     /// `committed`: the frame committed; `instant`: the viewport an instant scroll this frame
     /// asked to move, if any.
     #[inline(always)]
-    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+    #[cfg(debug_assertions)]
     pub(crate) fn frame_ends(&mut self, scrolling: bool, committed: bool, instant: Option<&str>) {
         #[cfg(debug_assertions)]
         {
