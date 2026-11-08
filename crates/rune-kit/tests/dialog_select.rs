@@ -62,3 +62,28 @@ fn a_fit_dialog_is_as_tall_as_its_content() {
     assert_eq!((panel[0], panel[1]), ((1000.0 - 400.0) / 2.0, (800.0 - panel[3]) / 2.0), "centred in the layer");
     assert_eq!(buttons[1] + buttons[3], panel[1] + panel[3], "the buttons sit at the bottom edge");
 }
+
+#[test]
+fn a_long_description_wraps_inside_the_panel() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        let k = Kit::neutral(true);
+        let mut layer = Vec::new();
+        let long = "\u{201c}Count from 1 to 300, one number per line, nothing else.\u{201d} and its transcript are deleted from this computer. This can't be undone.";
+        Dialog::new("delete", "Delete thread?").description(long).width(400.0).fit()
+            .open(true).on_close(|_: &mut ()| {}).build(&k, &mut layer);
+        root(rune::el().w_full().h_full(), layer)
+    }
+    let mut rt = Runtime::new((), view, (1400.0, 800.0), Env::new(true, 1.0));
+    for _ in 0..60 { rt.frame(1.0 / 60.0); }
+    let elements = rt.elements();
+    let rect = |key: &str| elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect;
+    let panel = rect("delete-dialog");
+    let header = rect("header");
+    let close = rect("close");
+    assert_eq!(panel[2], 400.0, "the panel keeps its width");
+    assert!(header[0] + header[2] <= panel[0] + panel[2] + 0.5, "the header {header:?} stays in the panel {panel:?}");
+    assert!(close[0] + close[2] <= panel[0] + panel[2], "and so does the close button {close:?}");
+    let text = elements.iter().filter(|e| e.text.as_deref().is_some_and(|t| t.ends_with("undone."))).map(|e| e.rect).next().unwrap();
+    assert!(text[0] + text[2] <= panel[0] + panel[2], "the description {text:?} wraps in the panel");
+    assert!(text[3] >= 40.0, "onto more than one line: {text:?}");
+}
