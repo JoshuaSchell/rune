@@ -19,6 +19,8 @@ pub(crate) struct Handlers {
     pub on_press: Option<PressFn>,
     pub on_double_press: Option<PressFn>,
     pub on_secondary_press: Option<PointerFn>,
+    /// `El::on_middle_press`.
+    pub on_middle_press: Option<PressFn>,
     pub on_hover: Option<PressFn>,
     pub on_hover_change: Option<WindowFocusFn>,
     /// Seconds the pointer must stay inside, then outside, before `on_hover_change` hears it.
@@ -33,7 +35,9 @@ pub(crate) struct Handlers {
     pub on_drag_end: Option<DragEndFn>,
     pub drop: Option<Box<DropSpec>>,
     pub on_at_bottom: Option<AtBottomFn>,
-    pub on_far_from_bottom: Option<(f32, AtBottomFn)>,
+    /// `on_far_from_bottom`: its least distance, the key of the frame whose height counts in
+    /// place of the viewport's own (`on_far_from_bottom_under`), and its handler.
+    pub on_far_from_bottom: Option<(f32, Option<std::rc::Rc<str>>, AtBottomFn)>,
     pub on_visible_rows: Option<VisibleRowsFn>,
     pub on_layout: Option<LayoutTxFn>,
     pub on_screen_layout: Option<LayoutFn>,
@@ -84,6 +88,7 @@ impl Handlers {
             || self.on_press.is_some()
             || self.on_double_press.is_some()
             || self.on_secondary_press.is_some()
+            || self.on_middle_press.is_some()
             || self.on_hover.is_some()
             || self.on_hover_change.is_some()
             || self.on_drag.is_some()
@@ -103,6 +108,7 @@ impl Empty for Handlers {
         on_press: None,
         on_double_press: None,
         on_secondary_press: None,
+        on_middle_press: None,
         on_hover: None,
         on_hover_change: None,
         hover_delay: [0.0; 2],

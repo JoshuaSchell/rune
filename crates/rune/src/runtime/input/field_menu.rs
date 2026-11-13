@@ -3,10 +3,12 @@
 //! then Cut, Copy, Paste and, off macOS, Select All, then the app's Spellcheck setting
 //! (`El::on_spellcheck`) and, where there are dictionaries to choose, its Spellcheck Languages
 //! (`El::on_spellcheck_languages`). A field with its own `on_secondary_press` shows that instead.
+//! The items read the app's names for them (`rune::set_labels`) each time the menu opens.
 use super::input_click::hit;
 use super::*;
+use crate::labels::label;
 use crate::popup_menu::{PopupAnchor, Request};
-use crate::{Key, Mods, PopupItem, PopupMenu};
+use crate::{Key, Label, Mods, PopupItem, PopupMenu};
 
 /// What a field menu's items act on once one is picked.
 pub(crate) struct FieldMenu {
@@ -33,13 +35,13 @@ impl<S: 'static> Runtime<S> {
         let s = self.env.scale;
         let toggle = std::iter::successors(Some(i), |&j| self.nodes[j].parent).find_map(|j| self.nodes[j].handlers.on_spellcheck.clone());
         let keep = std::iter::successors(Some(i), |&j| self.nodes[j].parent).find_map(|j| self.nodes[j].handlers.on_spellcheck_languages.clone());
-        if self.focused.as_deref() != Some(path.as_str()) {
+        if self.focus.path() != Some(path.as_str()) {
             self.set_focus(Some(path.clone()), false);
         }
         let e = access(states!(self));
         e.set_single_line(single);
-        if let (Some((x, y)), Some(l)) = (local, layout.as_deref())
-            && e.preedit.is_none()
+        if let (Some((x, y)), Some(l)) = (local, layout.as_ref().map(TextLayout::view))
+            && e.preedit().is_none()
         {
             let caret = hit(e, l, x + scroll, y, s, single).caret;
             let (a, b) = e.range();
@@ -54,43 +56,53 @@ impl<S: 'static> Runtime<S> {
         }
         let (a, b) = e.range();
         let word = spell
-            .then(|| crate::spell::misspelled(&e.text))
+            .then(|| crate::spell::misspelled(&e.text, None))
             .filter(|found| found.contains(&(a, b)))
             .map(|_| (a, b, e.text[a..b].to_owned()));
         let suggestions = word.as_ref().map(|w| crate::spell::suggest(&w.2)).unwrap_or_default();
         let mut menu = PopupMenu::new();
         if word.is_some() {
             if suggestions.is_empty() {
-                menu = menu.item(PopupItem::new("no-guesses", "No Guesses Found").enabled(false));
+                menu = menu.item(PopupItem::new("no-guesses", label(Label::NoGuesses)).enabled(false));
             }
             menu = menu.items(suggestions.iter().enumerate().map(|(n, s)| PopupItem::new(format!("suggestion-{n}"), s.clone())));
-            menu = menu.separator().item(PopupItem::new("learn-spelling", "Learn Spelling")).separator();
+            menu = menu.separator().item(PopupItem::new("learn-spelling", label(Label::LearnSpelling))).separator();
         }
         let selected = a != b && !secure;
         menu = menu
-            .item(PopupItem::new("cut", "Cut").enabled(selected))
-            .item(PopupItem::new("copy", "Copy").enabled(selected))
-            .item(PopupItem::new("paste", "Paste"));
+            .item(PopupItem::new("cut", label(Label::Cut)).enabled(selected))
+            .item(PopupItem::new("copy", label(Label::Copy)).enabled(selected))
+            .item(PopupItem::new("paste", label(Label::Paste)));
         if !cfg!(target_os = "macos") {
-            menu = menu.item(PopupItem::new("select-all", "Select All"));
+            menu = menu.item(PopupItem::new("select-all", label(Label::SelectAll)));
         }
         let mut languages = None;
         if let Some((on, _)) = &toggle {
-            menu = menu.separator().item(PopupItem::new("spellcheck", "Spellcheck").checked(*on));
+            menu = menu.separator().item(PopupItem::new("spellcheck", label(Label::Spellcheck)).checked(*on));
             // Desktop's dictionary picker (spellcheck.ts), where the platform has dictionaries
             // to choose: the last one stays, as the Spellcheck item is how to stop checking.
             let available = crate::spell::available_languages();
             if let Some(keep) = keep.filter(|_| !available.is_empty()) {
                 let current = crate::spell::languages();
                 let only = |tag: &String| current.len() == 1 && current[0] == *tag;
-                let items = available.iter().map(|tag| {
-                    PopupItem::new(format!("language-{tag}"), crate::spell::language_name(tag)).checked(current.contains(tag)).enabled(!only(tag))
+                // Named in the app's language, in the order of those names, as Desktop's
+                // `nativeLanguageOptions` sorts its `Intl.DisplayNames`.
+                let locale = crate::labels::locale();
+                let name = |tag: &str| {
+                    crate::labels::named(Label::Language(tag))
+                        .or_else(|| locale.as_deref().and_then(|locale| crate::spell::language_name_in(tag, locale)))
+                        .unwrap_or_else(|| crate::spell::language_name(tag))
+                };
+                let mut named: Vec<(String, &String)> = available.iter().map(|tag| (name(tag), tag)).collect();
+                crate::spell::sort_names_in(&mut named, locale.as_deref().unwrap_or("en"));
+                let items = named.into_iter().map(|(name, tag)| {
+                    PopupItem::new(format!("language-{tag}"), name).checked(current.contains(tag)).enabled(!only(tag))
                 });
-                menu = menu.submenu_enabled("Spellcheck Languages", PopupMenu::new().items(items), *on);
+                menu = menu.submenu_enabled(label(Label::SpellcheckLanguages), PopupMenu::new().items(items), *on);
                 languages = Some((current, keep));
             }
         }
-        one.instant = true;
+        one.commit = one.commit.instant();
         log_event!(self, "field menu {path}");
         self.popups.push_back(Request {
             menu,
@@ -103,7 +115,7 @@ impl<S: 'static> Runtime<S> {
 
     /// Does what `picked` in field menu `menu` asks, on its field.
     pub(super) fn field_menu_pick(&mut self, menu: FieldMenu, picked: &str, one: &mut Tx) {
-        if self.focused.as_deref() != Some(menu.path.as_str()) && self.live(&menu.path).is_some() {
+        if self.focus.path() != Some(menu.path.as_str()) && self.live(&menu.path).is_some() {
             self.set_focus(Some(menu.path.clone()), false);
         }
         let command = |c| KeyEvent { key: Key::Command(c), mods: Mods { cmd: true, ctrl: !cfg!(target_os = "macos"), ..Mods::default() } };
@@ -115,7 +127,7 @@ impl<S: 'static> Runtime<S> {
                     _ => 'a',
                 });
                 let layout = self.focused_layout();
-                self.with_focused(|e| e.key(&ev, layout.as_deref()), one);
+                self.with_focused(|e| e.key_in(&ev, layout.as_ref().map(TextLayout::view)), one);
             }
             "paste" => one.request_paste(),
             "learn-spelling" => {

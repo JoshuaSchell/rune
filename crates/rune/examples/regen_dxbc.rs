@@ -1,5 +1,7 @@
-//! Rewrites the precompiled DX12 uber shader (`uber.vs.dxbc`, `uber.fs.dxbc` and
-//! `src/render/uber_dxbc_hash.rs`) after `shader.wgsl`, `clip.wgsl`, the uber layout or wgpu
+//! Rewrites the precompiled DX12 uber shader (`uber.vs.dxbc`, `uber.fs.dxbc`, the subpixel
+//! variant's `uber.vs-dual.dxbc` and `uber.fs-dual.dxbc`, and
+//! `src/render/uber/dxbc_hash.rs`), and the straight-alpha pass's `alpha.vs.dxbc`, `alpha.fs.dxbc` and
+//! `src/render/uber/pass_dxbc_hash.rs`, after `shader.wgsl`, `clip.wgsl`, `outline.wgsl`, the uber layout or wgpu
 //! changes, without building Rune's unit tests: `cargo run -p rune --example regen_dxbc` on
 //! Windows. It does what `RUNE_REGENERATE_DXBC=1 cargo test -p rune --lib uber_dxbc_is_fresh`
 //! does: makes the uber pipeline from WGSL on a DX12 device, takes the HLSL wgpu-hal logs, and
@@ -13,27 +15,53 @@ fn main() {
     log::set_logger(&Capture).expect("the only logger");
     log::set_max_level(log::LevelFilter::Debug);
     let gpu = rune::render::Gpu::headless();
-    drop(rune::render::Renderer::new(&gpu.device, wgpu::TextureFormat::Bgra8Unorm));
+    let mut renderer = rune::render::Renderer::new(&gpu.device, wgpu::TextureFormat::Bgra8Unorm);
+    let uber_logged = HLSL.lock().unwrap().len();
+    // The subpixel variant (render/variant.rs `dual_wgsl`): FXC takes about a minute for it.
+    renderer.compile_subpixel_now(&gpu.device).expect("the subpixel pipeline compiles");
+    drop(renderer);
     let logged = HLSL.lock().unwrap();
-    let stage = |name: &str| {
+    let stage = |logged: &[String], name: &str| {
         let text = logged.iter().rev().find(|text| text.starts_with(&format!("Naga generated shader for \"{name}\"")))
             .unwrap_or_else(|| panic!("wgpu logged no HLSL for {name}: is the device DX12 with FXC?"));
         text.split_once(":\n").unwrap().1.to_owned()
     };
-    let (vertex, fragment) = (stage("vs"), stage("fs"));
+    let (vertex, fragment) = (stage(&logged[..uber_logged], "vs"), stage(&logged[..uber_logged], "fs"));
+    let (dual_vertex, dual_fragment) = (stage(&logged[uber_logged..], "vs"), stage(&logged[uber_logged..], "fs"));
     let (vs, fs) = (fxc(&vertex, "vs", "vs_5_1"), fxc(&fragment, "fs", "ps_5_1"));
-    let (wgsl, abi) = rune::render::uber_shader_identity();
-    let wgsl = blake3::hash(wgsl.as_bytes()).to_hex();
+    let started = std::time::Instant::now();
+    let (vs_dual, fs_dual) = (fxc(&dual_vertex, "vs", "vs_5_1"), fxc(&dual_fragment, "fs", "ps_5_1"));
+    println!("FXC took {:.1} s for the subpixel variant", started.elapsed().as_secs_f64());
+    // The hash the build took of the WGSL it joined, CRLF read as LF (crates/rune/build.rs).
+    let (_, wgsl, abi) = rune::render::uber_shader_identity();
     let hlsl = blake3::hash(format!("{vertex}\0{fragment}").as_bytes()).to_hex();
     let root = env!("CARGO_MANIFEST_DIR");
     std::fs::write(format!("{root}/uber.vs.dxbc"), &vs).unwrap();
     std::fs::write(format!("{root}/uber.fs.dxbc"), &fs).unwrap();
-    std::fs::write(format!("{root}/src/render/uber_dxbc_hash.rs"), format!(
+    std::fs::write(format!("{root}/uber.vs-dual.dxbc"), &vs_dual).unwrap();
+    std::fs::write(format!("{root}/uber.fs-dual.dxbc"), &fs_dual).unwrap();
+    let dual = blake3::hash(format!("{dual_vertex}\0{dual_fragment}").as_bytes()).to_hex();
+    std::fs::write(format!("{root}/src/render/uber/dxbc_hash.rs"), format!(
         "// Written by `cargo run -p rune --example regen_dxbc` (or `RUNE_REGENERATE_DXBC=1 cargo test -p rune --lib uber_dxbc_is_fresh`) on Windows.\n\
          pub(super) const UBER_DXBC_WGSL_BLAKE3: &str = \"{wgsl}\";\n\
          pub(super) const UBER_DXBC_ABI_FNV64: u64 = {abi:#018x};\n\
-         #[cfg(test)]\npub(super) const UBER_DXBC_HLSL_BLAKE3: &str = \"{hlsl}\";\n")).unwrap();
-    println!("uber.vs.dxbc {} bytes, uber.fs.dxbc {} bytes, WGSL {wgsl}", vs.len(), fs.len());
+         #[cfg(test)]\npub(super) const UBER_DXBC_HLSL_BLAKE3: &str = \"{hlsl}\";\n\
+         #[cfg(test)]\npub(super) const UBER_DXBC_DUAL_HLSL_BLAKE3: &str = \"{dual}\";\n")).unwrap();
+    println!("uber.vs.dxbc {} bytes, uber.fs.dxbc {} bytes, uber.fs-dual.dxbc {} bytes, WGSL {wgsl}", vs.len(), fs.len(), fs_dual.len());
+    drop(logged);
+
+    // The other built-in passes, each made once from its WGSL (render/dxbc.rs loads them).
+    let start = HLSL.lock().unwrap().len();
+    rune::render::make_straight_alpha(&gpu.device, wgpu::TextureFormat::Bgra8Unorm);
+    let logged = HLSL.lock().unwrap();
+    let (alpha_vs, alpha_fs) = (fxc(&stage(&logged[start..], "vs"), "vs", "vs_5_1"), fxc(&stage(&logged[start..], "fs"), "fs", "ps_5_1"));
+    std::fs::write(format!("{root}/alpha.vs.dxbc"), &alpha_vs).unwrap();
+    std::fs::write(format!("{root}/alpha.fs.dxbc"), &alpha_fs).unwrap();
+    let alpha_wgsl = blake3::hash(std::fs::read_to_string(format!("{root}/src/surface_alpha.wgsl")).unwrap().replace("\r\n", "\n").as_bytes()).to_hex();
+    std::fs::write(format!("{root}/src/render/uber/pass_dxbc_hash.rs"), format!(
+        "// Written by `cargo run -p rune --example regen_dxbc` on Windows.\n\
+         pub(super) const ALPHA_DXBC_WGSL_BLAKE3: &str = \"{alpha_wgsl}\";\n")).unwrap();
+    println!("alpha.vs.dxbc {} bytes, alpha.fs.dxbc {} bytes, WGSL {alpha_wgsl}", alpha_vs.len(), alpha_fs.len());
 }
 
 #[cfg(not(target_os = "windows"))]

@@ -66,16 +66,19 @@ pub use script::Script;
 pub use sources::Compiled;
 pub use sources::ENTRY;
 pub use sources::Sources;
+pub use sources::precompiled;
 pub use ui::Palette;
 pub use ui::default_palette;
 pub use ui::host::Handler;
 pub use ui::host::HostNode;
 pub use ui::host::NodeArgs;
+pub use ui::host::Press;
 pub use ui::host::Prop;
 pub use ui::props::prop_names;
 pub use vm::Host;
 pub use workers::Completer;
 pub use workers::spawn_blocking;
 
-/// Whether this build runs Luau as native code (Windows and Linux) rather than interpreted.
+/// Whether this build compiles `--!native` modules to native code (the `native-code` feature, on
+/// Windows and Linux) rather than interpreting them.
 pub const NATIVE_CODE: bool = cfg!(luau_jit);

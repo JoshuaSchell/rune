@@ -15,9 +15,13 @@ pub(super) struct Renderer {
     pub(super) on_task: Option<TaskWire>,
     pub(super) tasks_read_only: bool,
     pub(super) link_ring: Option<LinkRing>,
+    /// `Markdown::code_link`.
+    pub(super) code_link: Option<CodeLink>,
     pub(super) selectable: bool,
     /// `Markdown::scroll_wide`.
     pub(super) scroll_wide: bool,
+    /// `Markdown::dir_tentative`.
+    pub(super) tentative: Option<rune::Direction>,
     pub(super) highlighter: Highlighter,
     pub(super) sources: Rc<[Source]>,
     /// The next of `sources`, advanced at each [`Block::Code`] in document order.
@@ -31,6 +35,8 @@ pub(super) struct Renderer {
     pub(super) diagram_frame: Option<FrameWire>,
     /// `Markdown::code_frame`.
     pub(super) code_frame: Option<CodeWire>,
+    /// `Markdown::quote_frame`.
+    pub(super) quote_frame: Option<QuoteWire>,
     /// `Markdown::link_favicon`.
     pub(super) link_favicon: Option<link_icon::FaviconWire>,
     /// `Markdown::images` and `Markdown::on_image`.
@@ -49,6 +55,40 @@ pub(super) struct Flow {
     pub(super) ink: Option<Color>,
     /// How much narrower than the text column they are: list indents and quote rules.
     pub(super) inset: f32,
+    /// The columns a nested list's copied markers are indented by (`"  - "` under `"- "`).
+    pub(super) cols: u8,
+    /// The marker a copy puts before the paragraph that opens a list item, its indent, and the
+    /// newlines before it: two to set a top-level list apart from the block before it.
+    pub(super) lead: Option<(u8, Lead, u8)>,
+    /// They're the last top-level block of a source still streaming in: its text wraps greedily,
+    /// as a page keeps `text-wrap-style: auto` on the block that grows, so settled words stay put.
+    pub(super) growing: bool,
+}
+
+/// A list item's marker as copying writes it.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Lead {
+    Bullet,
+    Number(u64),
+    Task(bool),
+}
+
+impl Lead {
+    pub(super) fn marker(self) -> String {
+        match self {
+            Lead::Bullet => "- ".into(),
+            Lead::Number(n) => format!("{n}. "),
+            Lead::Task(done) => if done { "- [x] ".into() } else { "- [ ] ".into() },
+        }
+    }
+
+    /// The columns a list nested in the item is indented by, past the item's own.
+    pub(super) fn width(self) -> u8 {
+        match self {
+            Lead::Number(n) => n.to_string().len() as u8 + 2,
+            _ => 2,
+        }
+    }
 }
 
 /// Shell languages, which [`MarkdownStyle::shell_code`] styles apart (`markdown.tsx`'s list).
@@ -111,13 +151,39 @@ pub(super) fn margins(b: &Block, s: &MarkdownStyle) -> (f32, f32) {
         Block::Heading(1, _) => (28.0, 12.0),
         Block::Heading(2, _) => (24.0, 10.0),
         Block::Heading(..) => (20.0, 8.0),
-        Block::Code { .. } | Block::Diff(_) | Block::Mermaid(_) => (12.0, 24.0),
+        Block::Code { .. } | Block::Diff(_) | Block::Mermaid(_) => (s.code_margin[0], s.code_margin[1]),
         Block::List { .. } => (8.0, 12.0),
         Block::Quote(_) => (16.0, 16.0),
         Block::Rule => (32.0, 32.0),
         Block::Table(_) => (s.table_margin[0], s.table_margin[1]),
         Block::Image { .. } => (24.0, 24.0),
     }
+}
+
+/// Block `b`'s (margin-top, margin-bottom) as CSS collapses them, `i` its place among its
+/// siblings and `in_item` whether they're a list item's: a list item's first paragraph has
+/// none, a later one 8 above and 12 below, a nested list 4 each way. A quote or a list has no
+/// vertical padding or border, so its first child's top margin and its last child's bottom
+/// margin pass through it, and a list item's 8 through the list: a quote that ends a list item
+/// spaces the list 16 from what follows, as it would standing alone.
+pub(super) fn collapsed(b: &Block, s: &MarkdownStyle, i: usize, in_item: bool) -> (f32, f32) {
+    let (mt, mb) = match b {
+        Block::Para(_) if in_item => (if i == 0 { 0.0 } else { 8.0 }, if i == 0 { 0.0 } else { 12.0 }),
+        Block::List { .. } if in_item => (4.0, 4.0),
+        _ => margins(b, s),
+    };
+    let (first, last) = match b {
+        Block::Quote(inner) => (
+            inner.first().map(|f| collapsed(f, s, 0, false).0),
+            inner.last().map(|l| collapsed(l, s, inner.len() - 1, false).1),
+        ),
+        Block::List { items, .. } => (
+            items.first().and_then(|item| item.first()).map(|f| collapsed(f, s, 0, true).0),
+            items.last().map(|item| item.last().map_or(0.0, |l| collapsed(l, s, item.len() - 1, true).1).max(s.list_gap)),
+        ),
+        _ => (None, None),
+    };
+    (first.map_or(mt, |f| f.max(mt)), last.map_or(mb, |l| l.max(mb)))
 }
 
 thread_local! {
@@ -181,6 +247,7 @@ fn tabbed(code: &str, mut spans: Vec<Span>, mut highlights: Vec<TextHighlight>, 
 
 impl Renderer {
     pub(super) fn spans(&self, inl: &Inline, font: TextStyle) -> Vec<Span> {
+        let inl = &*self.with_code_links(inl);
         let s = &self.s;
         let base = font.size;
         let links: Vec<Span> = if inl.links.is_empty() {
@@ -190,6 +257,9 @@ impl Renderer {
         };
         let mut next_link = 0;
         let mut out = Vec::with_capacity(inl.spans.len());
+        // Code keeps its own weight in bold text, as `markdown.css`'s `:not(pre) > code` sets it, so
+        // its spans go after the rest: of overlapping spans, the later one's weight wins.
+        let mut code = Vec::new();
         for &(a, b, st) in &inl.spans {
             if matches!(st, Style::Link) {
                 let sp = links[next_link].clone();
@@ -206,6 +276,14 @@ impl Renderer {
             // Code in a link is a chip in the link's colour, not underlined as well.
             let no_line = in_link.is_some_and(|l| l.underline.is_some()).then_some(Color::TRANSPARENT);
             match st {
+                Style::Code if self.code_link_color(a, b, inl).is_some() => {
+                    sp.mono = true;
+                    sp.weight = Some(s.inline_code_weight);
+                    sp.size = Some(base * s.inline_code_scale);
+                    sp.color = self.code_link_color(a, b, inl);
+                    code.push(sp);
+                    continue;
+                }
                 Style::Code => {
                     let link_base = in_link.and_then(|l| l.size).unwrap_or(base);
                     sp.mono = true;
@@ -215,6 +293,8 @@ impl Renderer {
                     if in_link.is_none_or(|l| l.bg.is_none()) {
                         sp = sp.bg(s.code_bg, s.inline_code_pad);
                     }
+                    code.push(sp);
+                    continue;
                 }
                 Style::CodePad => {
                     sp.size = Some(pad_size(font, s.inline_code_pad));
@@ -226,6 +306,7 @@ impl Renderer {
             }
             out.push(sp);
         }
+        out.extend(code);
         out
     }
 
@@ -277,6 +358,7 @@ impl Renderer {
     }
 
     pub(super) fn with_reveal(&self, e: El) -> El {
+        let e = if self.flow.get().growing { e.wrap_greedy() } else { e };
         if self.reveal >= 0.0 {
             e.reveal(self.reveal)
         } else if self.streaming {
@@ -290,6 +372,13 @@ impl Renderer {
         // Lines keep their own 22.4 points, as a page's do, so a long list doesn't drift a
         // point per item.
         let e = self.with_reveal(rich(inl.text.clone(), self.spans(inl, style)).font(style).color(color).exact_lines()).w_full();
+        let e = bidi::directed(bidi::isolated(e, inl), bidi::inline_dir(inl));
+        // A copy puts a blank line around a paragraph, one newline around a list item's first
+        // with its marker before it.
+        let e = match self.flow.get().lead {
+            Some((cols, lead, before)) => e.copy_prefix(format!("{}{}", " ".repeat(cols.into()), lead.marker())).copy_breaks(before, 1),
+            None => e.copy_breaks(2, 2),
+        };
         self.select_inline(e, inl, map)
     }
 
@@ -307,6 +396,8 @@ impl Renderer {
         let mut after_heading = false;
         let names = rendered_keys(blocks.len(), keys);
         let empty = BlockMap::None;
+        // A block with no strong character of its own reads the way the one before it does.
+        let mut last = if top_level { self.tentative } else { None };
         for ((i, b), key) in blocks.iter().enumerate().zip(names) {
             // A fence still arriving with no lines yet (its language may be half written:
             // ```` ```mer ````) shows nothing until its first line, then mounts as what it is.
@@ -317,11 +408,7 @@ impl Renderer {
                     continue;
                 }
             }
-            let (mt, mb) = match b {
-                Block::Para(_) if in_item => (if i == 0 { 0.0 } else { 8.0 }, if i == 0 { 0.0 } else { 12.0 }),
-                Block::List { .. } if in_item => (4.0, 4.0),
-                _ => margins(b, &self.s),
-            };
+            let (mt, mb) = collapsed(b, &self.s, i, in_item);
             let top = match b {
                 _ if i == 0 => 0.0,
                 // An image keeps its own 24 under a heading: the page zeroes the top margin of
@@ -332,8 +419,20 @@ impl Renderer {
             };
             if top_level {
                 self.current_block_key.replace(key.clone().into());
+                self.flow.set(Flow { growing: self.streaming && i + 1 == blocks.len(), ..self.flow.get() });
             }
-            c = c.child(self.block(b, maps.get(i).unwrap_or(&empty)).key(key).mt(top));
+            // Only an item's first block copies after its marker.
+            if i > 0 {
+                self.flow.set(Flow { lead: None, ..self.flow.get() });
+            }
+            let own = bidi::blocks_dir(std::slice::from_ref(b));
+            let prose = !matches!(b, Block::Code(_) | Block::Diff(_) | Block::Mermaid(_) | Block::Image { .. } | Block::Rule);
+            let drawn = self.block(b, maps.get(i).unwrap_or(&empty));
+            let drawn = if prose { bidi::directed(drawn, own.or(last)) } else { drawn };
+            if own.is_some() {
+                last = own;
+            }
+            c = c.child(drawn.key(key).mt(top));
             prev_mb = mb;
             after_heading = matches!(b, Block::Heading(..));
         }
@@ -351,8 +450,10 @@ impl Renderer {
             None => (s.code_block_fill, s.code_block_border, s.code_text.unwrap_or(s.text)),
         };
         let spans = if shell.is_some() { Vec::new() } else { self.syntax_spans(code, source) };
-        let body = self.with_reveal(tabbed(code, spans, highlights, s.code_block).font(s.code_block).color(ink));
-        let frame = col().role("code").w_full().radius(6.0).fill(fill).border(0.5, border);
+        let body = self.with_reveal(tabbed(code, spans, highlights, s.code_block).font(s.code_block).color(ink)).copy_breaks(2, 2);
+        // `.highlights`' `border: 0.5px` takes its device pixel each side, inside which the padding sits.
+        // Code reads left to right in any document, as `markdown.css` isolates it.
+        let frame = col().role("code").dir(rune::Direction::Ltr).w_full().radius(6.0).fill(fill).border(0.5, border).border_layout();
         if self.scroll_wide {
             // The text sizes to its longest line inside the viewport, which scrolls under the
             // padding so lines run to the frame's edge.
@@ -368,7 +469,7 @@ impl Renderer {
     pub(super) fn syntax_spans(&self, code: &str, source: Option<&Source>) -> Vec<Span> {
         let Some(src) = source.filter(|_| self.s.highlight) else { return Vec::new() };
         let lang = src.lang.as_deref();
-        // The built-in scanners leave other languages plain; skip the cache for those.
+        // The built-in highlighter leaves other languages plain; skip the cache for those.
         if self.highlighter.is_builtin() && !lang.is_some_and(crate::syntax::known) {
             return Vec::new();
         }
@@ -380,8 +481,9 @@ impl Renderer {
     pub(super) fn diff(&self, src: &str, map: Option<&SpanMap>) -> El {
         let s = &self.s;
         let all_hl = self.text_highlights_for(src, map);
-        let mut c = col().role("code").w_full().py(s.code_block_pad[1]).radius(6.0).fill(s.code_block_fill).border(0.5, s.code_block_border);
+        let mut c = col().role("code").dir(rune::Direction::Ltr).w_full().py(s.code_block_pad[1]).radius(6.0).fill(s.code_block_fill).border(0.5, s.code_block_border).border_layout();
         let mut line_start = 0usize;
+        let last = src.split('\n').count() - 1;
         for (n, line) in src.split('\n').enumerate() {
             let line_end = line_start + line.len();
             let line_hl: Vec<TextHighlight> = all_hl
@@ -407,7 +509,8 @@ impl Renderer {
                 .key(format!("l{n}"))
                 .w_full()
                 .px(s.code_block_pad[0])
-                .child(self.select(self.with_reveal(tabbed(shown, Vec::new(), line_hl, s.code_block).font(s.code_block).color(color).wrap()).w_full()));
+                .child(self.select(self.with_reveal(tabbed(shown, Vec::new(), line_hl, s.code_block).font(s.code_block).color(color).wrap()).w_full()
+                    .copy_breaks(if n == 0 { 2 } else { 1 }, if n == last { 2 } else { 1 })));
             if let Some(t) = tint {
                 r = r.fill(t);
             }
@@ -526,7 +629,8 @@ impl Renderer {
                     BlockMap::Table { head, rows } => (head.as_slice(), rows.as_slice()),
                     _ => (&[][..], &[][..]),
                 };
-                self.table(t, head_maps, row_maps)
+                // Its first column stands on the side its words start on.
+                bidi::directed(self.table(t, head_maps, row_maps), bidi::table_dir(t))
             }
             Block::List { start, items } => {
                 let item_maps = match map {
@@ -540,15 +644,29 @@ impl Renderer {
                 };
                 // Outside markers end a space's width before the text, as a browser sets "1. ".
                 let space = if s.list_outside { rune::text::measure("x x", &[], s.body, None).0 - rune::text::measure("xx", &[], s.body, None).0 } else { 0.0 };
-                self.flow.set(Flow { lists: flow.lists + 1, inset: flow.inset + indent, ..flow });
-                let mut c = col().role("list").w_full().gap(s.list_gap);
+                let mut c = col().role("list").w_full();
                 let n = items.len();
+                // Between items, their 8 collapsed with the margins passing out of the blocks
+                // either side (`collapsed`): an item ending in a quote keeps its 16 below.
+                let edge = |item: &[Block], last: bool| match (last, item) {
+                    (true, [.., l]) => collapsed(l, s, item.len() - 1, true).1,
+                    (false, [f, ..]) => collapsed(f, s, 0, true).0,
+                    _ => 0.0,
+                };
+                let gap = |k: usize| if k == 0 { 0.0 } else { s.list_gap.max(edge(&items[k - 1], true)).max(edge(&items[k], false)) };
                 for (k, item) in items.iter().enumerate() {
                     let imap = item_maps.get(k).map_or(&[][..], Vec::as_slice);
                     let task_idx = self.next_task.get();
                     self.next_task.set(task_idx + 1);
-                    if let Some((checked, marker_offset)) = self.tasks.get(task_idx).copied().flatten() {
-                        c = c.child(self.task_item((k, n), indent, item, imap, marker_offset, checked));
+                    let task = self.tasks.get(task_idx).copied().flatten();
+                    let lead = match (task, start) {
+                        (Some((checked, _)), _) => Lead::Task(checked),
+                        (None, Some(n)) => Lead::Number(n + k as u64),
+                        (None, None) => Lead::Bullet,
+                    };
+                    self.flow.set(Flow { lists: flow.lists + 1, inset: flow.inset + indent, cols: flow.cols + lead.width(), lead: Some((flow.cols, lead, if k == 0 && flow.lists == 0 { 2 } else { 1 })), ..flow });
+                    if let Some((checked, marker_offset)) = task {
+                        c = c.child(self.task_item((k, n), indent, item, imap, marker_offset, checked).mt(gap(k)));
                         continue;
                     }
                     let marker = match start {
@@ -564,12 +682,15 @@ impl Renderer {
                             .role("listitem")
                             .position_in_set(k + 1, n)
                             .w_full()
+                            .mt(gap(k))
                             .child(self.with_reveal(marker).a11y_hidden())
                             .child(self.blocks_in(item, imap, &[], false, true).grow(1.0).shrink()),
                     );
                 }
                 self.flow.set(flow);
-                c
+                // One direction for the whole list, its first item's with any, so every marker
+                // stands on one rail; each item's paragraphs still read their own way.
+                bidi::directed(c, items.iter().find_map(|item| bidi::blocks_dir(item)))
             }
             Block::Quote(inner) => {
                 let inner_maps = match map {
@@ -578,14 +699,23 @@ impl Renderer {
                 };
                 let q = s.quote;
                 let flow = self.flow.get();
+                let first_task = self.next_task.get();
                 self.flow.set(Flow { ink: q.text.or(flow.ink), inset: flow.inset + q.width + q.pad, ..flow });
-                let inner = self.blocks(inner, inner_maps, &[], false);
+                let drawn = self.blocks(inner, inner_maps, &[], false);
                 self.flow.set(flow);
-                row()
-                    .role("blockquote")
-                    .w_full()
-                    .child(el().w(q.width).h_full().radius((q.width / 2.0).min(1.0)).fill(s.quote_rule))
-                    .child(inner.grow(1.0).shrink().pl(q.pad))
+                // The rule stands on the side the quote starts on.
+                let quote = bidi::directed(
+                    row()
+                        .role("blockquote")
+                        .w_full()
+                        .child(el().w(q.width).h_full().radius((q.width / 2.0).min(1.0)).fill(s.quote_rule))
+                        .child(drawn.grow(1.0).shrink().pl(q.pad)),
+                    bidi::blocks_dir(inner),
+                );
+                match &self.quote_frame {
+                    Some(f) => f(quote, &QuoteFrame { text: &self.plain_text(inner, first_task, Flow { lead: None, ..flow }) }),
+                    None => quote,
+                }
             }
             // A clear rule is spacing only (`hr { border: none; height: 0 }`).
             Block::Image { src, alt, title } => self.image(src, alt, title),
@@ -599,7 +729,7 @@ fn item_label(blocks: &[Block]) -> String {
     let mut out = String::new();
     for b in blocks {
         let text = match b {
-            Block::Para(inl) | Block::Heading(_, inl) => inl.text.replace(PAD, ""),
+            Block::Para(inl) | Block::Heading(_, inl) => unpadded(&inl.text),
             Block::Code(s) | Block::Diff(s) | Block::Mermaid(s) => s.clone(),
             Block::Image { alt, .. } => alt.clone(),
             _ => continue,

@@ -3,6 +3,9 @@
 use objc2_app_kit::NSSpellChecker;
 use objc2_foundation::{NSRange, NSString};
 
+/// AppKit's checker runs in this process: lines are checked where they're asked for.
+pub(super) const OFF_THREAD: bool = false;
+
 /// `NSNotFound`, the location of a range that found nothing.
 const NOT_FOUND: usize = isize::MAX as usize;
 
@@ -53,6 +56,11 @@ pub(super) fn available() -> Vec<String> { Vec::new() }
 pub(super) fn preferred() -> Vec<String> { Vec::new() }
 
 pub(super) fn english_name(tag: &str) -> String { tag.to_owned() }
+
+/// Unused: macOS has no dictionaries to choose, so no list names them.
+pub(super) fn name_in(_: &str, _: &str) -> Option<String> { None }
+
+pub(super) fn sort_in<T>(_: &mut [(String, T)], _: &str) -> bool { false }
 
 pub(super) fn learn(word: &str) {
     // SAFETY: the shared checker is AppKit's own and the word a live string.

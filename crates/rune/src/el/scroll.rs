@@ -12,17 +12,25 @@ impl El {
     /// viewport never overflows. Debug builds warn once per call site when a viewport inside a
     /// `.grow()` container resolves to 0 pt tall while its content is not.
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn scroll(self, spec: ScrollSpec) -> Self {
-        self.viewport(spec, ScrollAxes::Y, taffy::Overflow::Hidden, taffy::Overflow::Scroll)
+    #[inline]
+    pub fn scroll(mut self, spec: ScrollSpec) -> Self {
+        self.set_scroll(spec);
+        self
+    }
+    /// [`El::scroll`] in place.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn set_scroll(&mut self, spec: ScrollSpec) -> &mut Self {
+        self.viewport(spec, ScrollAxes::Y, taffy::Overflow::Hidden, taffy::Overflow::Scroll);
+        self
     }
     #[cfg_attr(debug_assertions, track_caller)]
-    fn viewport(mut self, spec: ScrollSpec, axes: ScrollAxes, x: taffy::Overflow, y: taffy::Overflow) -> Self {
-        self.scroll = Some(spec);
-        self.scroll_axes = axes;
+    fn viewport(&mut self, spec: ScrollSpec, axes: ScrollAxes, x: taffy::Overflow, y: taffy::Overflow) {
+        let cold = self.cold_mut();
+        cold.scroll = Some(spec);
+        cold.scroll_axes = axes;
         #[cfg(debug_assertions)]
-        { self.scroll_source = Some(std::panic::Location::caller()); }
+        { cold.scroll_source = Some(std::panic::Location::caller()); }
         self.style.set_overflow(x, y);
-        self
     }
     /// A horizontal scroll viewport over its children: a filmstrip, a wide code block or
     /// table, a tab strip that overflows.
@@ -42,8 +50,16 @@ impl El {
     /// and [`Tx::scroll_into_view`] scrolls it to show a row. `El::virtualize` and
     /// `El::virtual_rows` window vertical lists only.
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn scroll_x(self) -> Self {
-        self.viewport(ScrollSpec { stick_bottom: false }, ScrollAxes::X, taffy::Overflow::Scroll, taffy::Overflow::Hidden)
+    #[inline]
+    pub fn scroll_x(mut self) -> Self {
+        self.set_scroll_x();
+        self
+    }
+    /// [`El::scroll_x`] in place.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn set_scroll_x(&mut self) -> &mut Self {
+        self.viewport(ScrollSpec { stick_bottom: false }, ScrollAxes::X, taffy::Overflow::Scroll, taffy::Overflow::Hidden);
+        self
     }
     /// A viewport that scrolls both ways over its children (a wide timeline, a large
     /// table): [`El::scroll`] and [`El::scroll_x`] together. A trackpad gesture moves it along
@@ -52,9 +68,17 @@ impl El {
     /// [`El::scroll`]. The content takes its natural width as in [`El::scroll_x`] and its
     /// natural height.
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn scroll_xy(self) -> Self {
-        let spec = self.scroll.unwrap_or(ScrollSpec { stick_bottom: false });
-        self.viewport(spec, ScrollAxes::Both, taffy::Overflow::Scroll, taffy::Overflow::Scroll)
+    #[inline]
+    pub fn scroll_xy(mut self) -> Self {
+        self.set_scroll_xy();
+        self
+    }
+    /// [`El::scroll_xy`] in place.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn set_scroll_xy(&mut self) -> &mut Self {
+        let spec = self.cold.scroll.unwrap_or(ScrollSpec { stick_bottom: false });
+        self.viewport(spec, ScrollAxes::Both, taffy::Overflow::Scroll, taffy::Overflow::Scroll);
+        self
     }
     /// On a scroll viewport, called with whether it shows its bottom (within a point): once
     /// after its first layout, then only when that changes, never per frame. Pair with
@@ -67,7 +91,15 @@ impl El {
     /// least `min` points, above its bottom: where a chat shows its "jump to latest" button and
     /// hides it again near the end. Once after its first layout, then only when that changes.
     pub fn on_far_from_bottom<S: 'static>(mut self, min: f32, f: impl Fn(&mut S, bool) + 'static) -> Self {
-        self.handlers.on_far_from_bottom = Some((min, Rc::new(move |s, far| f(downcast::<S>(s), far))));
+        self.handlers.on_far_from_bottom = Some((min, None, Rc::new(move |s, far| f(downcast::<S>(s), far))));
+        self
+    }
+    /// [`El::on_far_from_bottom`] for a viewport that runs under a frame, the nearest ancestor
+    /// keyed `frame` (a chat's pane, with a header and a dock over its scroll): far is more than
+    /// the frame's height above the bottom, and at least `min`. The height is measured as it
+    /// scrolls, so the view never reads it and a resize re-runs no view.
+    pub fn on_far_from_bottom_under<S: 'static>(mut self, min: f32, frame: &str, f: impl Fn(&mut S, bool) + 'static) -> Self {
+        self.handlers.on_far_from_bottom = Some((min, Some(Rc::from(frame)), Rc::new(move |s, far| f(downcast::<S>(s), far))));
         self
     }
     /// On a scroll viewport, fade its top and bottom edges over `width` points (16–32 reads well),
@@ -89,14 +121,14 @@ impl El {
     /// header stuck there. Everything [`El::scroll_edge_fade`] says of sticky elements, explicit
     /// masks and [`El::scroll_margin`] applies.
     pub fn scroll_fade(mut self, fade: ScrollFade) -> Self {
-        self.scroll_edges.fade = fade.width;
-        self.scroll_edges.fade_style = fade.style;
+        self.cold_mut().scroll_edges.fade = fade.width;
+        self.cold_mut().scroll_edges.fade_style = fade.style;
         self
     }
     /// On a scroll viewport, the space [`Tx::scroll_into_view`] leaves between a revealed row and
     /// the edge it scrolls to, like CSS `scroll-padding`. The content's own ends still stop flush.
     pub fn scroll_margin(mut self, pts: f32) -> Self {
-        self.scroll_edges.margin = pts.max(0.0);
+        self.cold_mut().scroll_edges.margin = pts.max(0.0);
         self
     }
     /// On a vertical scroll viewport, keep the row at the top of the view where it is when a
@@ -108,7 +140,7 @@ impl El {
     /// above shows. A [`Tx::keep_on_screen`] in the same commit wins, and so does a scroll.
     /// [`El::virtual_rows`] lists already keep their first visible row this way.
     pub fn scroll_anchor(mut self) -> Self {
-        self.scroll_edges.anchor = true;
+        self.cold_mut().scroll_edges.anchor = true;
         self
     }
 }
@@ -211,3 +243,47 @@ impl ScrollFade {
         self
     }
 }
+
+/// A vertical scroll viewport.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollSpec {
+    /// Follow the end: while scrolled to the bottom, growth keeps the bottom in view, and a new
+    /// viewport opens at the bottom on its first frame. When the content is a growth stack, room
+    /// the viewport gains at its bottom (a composer shrinking under it) is held under the last
+    /// row and closes on the stack's spring once its rows stop growing, so a send only moves
+    /// the rows up.
+    pub stick_bottom: bool,
+}
+
+/// A scroll viewport's content-aware edges: `El::scroll_edge_fade`, `El::scroll_margin` and
+/// `El::scroll_anchor`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ScrollEdges {
+    /// Fade width (points) for the top and bottom edges; 0 for none.
+    pub(crate) fade: f32,
+    /// How the fade follows the content hidden under each edge (`El::scroll_fade`).
+    pub(crate) fade_style: FadeStyle,
+    /// Space `Tx::scroll_into_view` leaves between a revealed row and the viewport's edge.
+    pub(crate) margin: f32,
+    /// The viewport keeps its top row where it is when content above it changes.
+    pub(crate) anchor: bool,
+}
+
+/// The axes a scroll viewport moves on: `El::scroll` (vertical), `El::scroll_x`, `El::scroll_xy`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ScrollAxes {
+    #[default]
+    Y,
+    X,
+    Both,
+}
+
+impl ScrollAxes {
+    pub(crate) fn x(self) -> bool { self != ScrollAxes::Y }
+    pub(crate) fn y(self) -> bool { self != ScrollAxes::X }
+    /// Whether it moves on the horizontal axis (`true`) or the vertical one.
+    pub(crate) fn has(self, horizontal: bool) -> bool { if horizontal { self.x() } else { self.y() } }
+}
+
+pub(crate) type AtBottomFn = Rc<dyn Fn(crate::states::States<'_>, bool)>;
+pub(crate) type VisibleRowsFn = Rc<dyn Fn(crate::states::States<'_>, std::ops::Range<usize>) -> bool>;
